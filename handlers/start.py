@@ -1,16 +1,16 @@
 # handlers/start.py
-from aiogram import Router
+from aiogram import Router, Bot
 from aiogram.types import Message
 from aiogram.filters import Command
 from database.dao import get_new_direct_trades_for_user, mark_trade_as_viewed
 from keyboards import main_reply_keyboard, item_inline_keyboard
-from utils.tasks import user_tasks  # ← импортируем user_tasks сюда
+from utils.tasks import user_tasks  # Хранит активные задачи
 import asyncio
 import logging
 
 router = Router()
-
 logger = logging.getLogger(__name__)
+
 
 def format_trade_message(trade_data: dict) -> str:
     """
@@ -84,7 +84,11 @@ def format_trade_message(trade_data: dict) -> str:
             # Обработка цены
             try:
                 price_float = float(price_value) if price_value not in (None, '') else 0.0
-                price_str = f"{price_float:,.0f}".replace(",", " ")
+                # Форматируем с пробелами как разделителями тысяч
+                price_str = f"{price_float:,.2f}".replace(",", " ")
+                # Убираем .00, если цена целая
+                if price_str.endswith(".00"):
+                    price_str = price_str[:-3]
             except (ValueError, TypeError):
                 price_str = "0"
 
@@ -93,64 +97,87 @@ def format_trade_message(trade_data: dict) -> str:
     return "\n".join(msg_parts)
 
 
-
-async def send_trades_to_user(bot, user_id):
+async def send_trades_to_user(bot: Bot, user_id: int):
     iteration_count = 0
-    while True:
-        iteration_count += 1
-        try:
-            logger.info(f"[Пользователь {user_id}] Итерация #{iteration_count}: Проверяю новые сделки...")
-            
-            # Получаем только те сделки, которые пользователь ещё не видел
-            trades = await get_new_direct_trades_for_user(user_id, limit=5)
-            logger.info(f"[Пользователь {user_id}] Получено {len(trades)} новых сделок")
+    try:
+        while True:
+            iteration_count += 1
+            try:
+                logger.info(f"[Пользователь {user_id}] Итерация #{iteration_count}: Проверяю новые сделки...")
 
-            if not trades:
-                logger.info(f"[Пользователь {user_id}] Новых сделок нет")
-            else:
-                for trade in trades:
-                    try:
-                        msg_text = format_trade_message(trade)
-                        sent_message = await bot.send_message(
-                            chat_id=user_id,
-                            text=msg_text,
-                            parse_mode="HTML",
-                            reply_markup=item_inline_keyboard(trade['id'])
-                        )
-                        logger.info(f"[Пользователь {user_id}] Отправлена сделка {trade['id']} (message_id: {sent_message.message_id})")
+                # Получаем только те сделки, которые пользователь ещё не видел
+                trades = await get_new_direct_trades_for_user(user_id)
+                logger.info(f"[Пользователь {user_id}] Получено {len(trades)} новых сделок")
 
-                        # Помечаем, что пользователь увидел сделку
-                        await mark_trade_as_viewed(user_id, trade['id'])
+                if not trades:
+                    logger.info(f"[Пользователь {user_id}] Новых сделок нет")
+                else:
+                    for trade in trades:
+                        trade_id = trade.get('id')
+                        if not trade_id:
+                            logger.warning(f"[Пользователь {user_id}] Пропущена сделка без ID: {trade}")
+                            continue
 
-                    except Exception as send_error:
-                        logger.error(f"[Пользователь {user_id}] Ошибка отправки сделки {trade['id']}: {send_error}", exc_info=True)
+                        try:
+                            msg_text = format_trade_message(trade)
+                            sent_message = await bot.send_message(
+                                chat_id=user_id,
+                                text=msg_text,
+                                parse_mode="HTML",
+                                reply_markup=item_inline_keyboard(trade_id)
+                            )
+                            logger.info(f"[Пользователь {user_id}] Отправлена сделка {trade_id} (message_id: {sent_message.message_id})")
 
-        except Exception as e:
-            logger.error(f"[Пользователь {user_id}] Ошибка в фоновой задаче: {e}", exc_info=True)
+                            # Помечаем как просмотренную сразу после отправки
+                            await mark_trade_as_viewed(user_id, trade_id)
 
-        await asyncio.sleep(20)
+                            # Задержка, чтобы не спамить Telegram API
+                            await asyncio.sleep(0.1)
+
+                        except Exception as send_error:
+                            logger.error(f"[Пользователь {user_id}] Ошибка отправки сделки {trade_id}: {send_error}", exc_info=True)
+
+            except Exception as e:
+                logger.error(f"[Пользователь {user_id}] Ошибка в фоновой задаче: {e}", exc_info=True)
+
+            # Интервал между проверками — минимум 60 сек
+            logger.info(f"щас будет слип: 20 сек")
+            await asyncio.sleep(20)
+
+    except asyncio.CancelledError:
+        logger.info(f"Фоновая задача для пользователя {user_id} была отменена.")
+        raise
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка в фоновой задаче для {user_id}: {e}", exc_info=True)
+    finally:
+        if user_id in user_tasks:
+            del user_tasks[user_id]
 
 
 @router.message(Command("start"))
 async def start_handler(message: Message):
     user_id = message.from_user.id
-    username = message.from_user.username
+    username = message.from_user.username or "unknown"
+    full_name = message.from_user.full_name
     logger.info(f"Пользователь {user_id} ({username}) отправил /start")
 
     await message.answer(
-        "Привет! Начинаю отправлять данные о прямых сделках...",
+        f"Привет, {full_name}! 🎉\n"
+        "Начинаю отправлять данные о прямых сделках...\n"
+        "Новые сделки будут приходить автоматически.",
         reply_markup=main_reply_keyboard()
     )
 
-    # Отмена предыдущей задачи
+    # Отменяем предыдущую задачу, если она есть
     if user_id in user_tasks:
         old_task = user_tasks[user_id]
         if not old_task.done():
             old_task.cancel()
-        del user_tasks[user_id]
-        logger.info(f"Предыдущая задача для {user_id} отменена")
+            logger.info(f"Предыдущая задача для {user_id} отменена")
+        if user_id in user_tasks:
+            del user_tasks[user_id]
 
-    # Запуск новой задачи
+    # Запускаем новую фоновую задачу
     task = asyncio.create_task(send_trades_to_user(message.bot, user_id))
     user_tasks[user_id] = task
     logger.info(f"Запущена фоновая задача для пользователя {user_id}")

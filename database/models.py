@@ -143,27 +143,29 @@ class UserAction(Base):
         return f"<UserAction ID={self.id}, Type={self.action_type}, Done={self.is_done}>"
 
 
-class Task(Base):
-    __tablename__ = 'tasks'
-    __table_args__ = {'extend_existing': True}
+# class Task(Base):
+#     __tablename__ = 'tasks'
+#     __table_args__ = {'extend_existing': True}
 
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer)
-    trade_id = Column(BigInteger, ForeignKey('direct_trades.id'))
-    name = Column(String(255))
-    deadline = Column(Date)
-    is_completed = Column(Boolean, default=False)
+#     id = Column(Integer, primary_key=True)
+#     user_id = Column(Integer)
+#     trade_id = Column(BigInteger, ForeignKey('direct_trades.id'))
+#     name = Column(String(255))
+#     deadline = Column(Date)
+#     is_completed = Column(Boolean, default=False)
 
-    def __repr__(self):
-        return f"<Task ID={self.id}, Name='{self.name}', Completed={self.is_completed}>"
+#     def __repr__(self):
+#         return f"<Task ID={self.id}, Name='{self.name}', Completed={self.is_completed}>"
 
 class UserViewedTrade(Base):
     __tablename__ = 'user_viewed_trades'
 
-    id = Column(BigInteger, primary_key=True)
-    user_id = Column(BigInteger, nullable=False)  # Telegram ID
-    trade_id = Column(BigInteger, ForeignKey('direct_trades.id'), nullable=False)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    trade_id = Column(Integer, ForeignKey('direct_trades.id'), nullable=False)
     viewed_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint('user_id', 'trade_id', name='_user_trade_uc'),)
 
@@ -181,3 +183,21 @@ class RequestLog(Base):
 
     def __repr__(self):
         return f"<RequestLog(user_id={self.user_id}, trade_id={self.trade_id}, sent_at={self.sent_at})>"
+    
+
+class Task(Base):
+    __tablename__ = 'tasks'
+
+    id = Column(BigInteger, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    trade_id = Column(BigInteger, ForeignKey('direct_trades.id'), nullable=False)
+    name = Column(String(255))
+    description = Column(Text)  # Для заметки
+    deadline = Column(DateTime)
+    is_completed = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    trade = relationship("DirectTrades", backref="tasks")
+
+    def __repr__(self):
+        return f"<Task ID={self.id}, Name='{self.name}', Deadline={self.deadline}, Completed={self.is_completed}>"

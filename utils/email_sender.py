@@ -68,7 +68,7 @@ def generate_email_text(trade_data: dict) -> str:
 
 
 
-async def send_request_email(trade_data: dict) -> bool:
+async def send_request_email(trade_data: dict, user_id: int = None) -> bool:
     sender = "gn9377419582@gmail.com"
     password = config.get("EMAIL_PASSWORD")
     recipient_emails = trade_data.get("emails")
@@ -93,7 +93,7 @@ async def send_request_email(trade_data: dict) -> bool:
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(sender, password)
-            server.sendmail(sender, recipients, msg.as_string())  # Отправка всем
+            server.sendmail(sender, recipients, msg.as_string())
             logger.info(f"📧 Письмо отправлено на: {recipients}")
         return True
 

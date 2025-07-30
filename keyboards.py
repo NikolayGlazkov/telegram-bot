@@ -13,3 +13,10 @@ def main_reply_keyboard():
         [KeyboardButton(text="Избранное"), KeyboardButton(text="Остановить")],
         [KeyboardButton(text="Старт")]
     ], resize_keyboard=True)
+
+def stopped_keyboard():
+    """Клавиатура после остановки"""
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="Избранное")],
+        [KeyboardButton(text="Старт")]
+    ], resize_keyboard=True)

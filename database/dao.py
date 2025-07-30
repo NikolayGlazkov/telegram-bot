@@ -5,6 +5,7 @@ from sqlalchemy.orm import selectinload
 from typing import List, Dict, Any, Optional
 from sqlalchemy.exc import SQLAlchemyError
 import logging
+from datetime import datetime
 from .db import async_session
 from .models import (
     User,
@@ -12,8 +13,10 @@ from .models import (
     ArbitrationManager,
     ArbitrationManagerContact,
     Lot,
+    UserAction,
     RequestLog,
     UserViewedTrade,
+    Task,
 )
 
 # Настройка логгирования
@@ -59,7 +62,7 @@ async def get_new_direct_trades_for_user(user_id: int, limit: int = 10) -> List[
             # Получаем ID сделок, которые пользователь уже видел
             viewed_stmt = select(UserViewedTrade.trade_id).where(UserViewedTrade.user_id == user_id)
             result = await session.execute(viewed_stmt)
-            viewed_ids = {row[0] for row in result.fetchall()}
+            viewed_ids = set(result.scalars().all())  # Работает даже с пустым результатом
 
             # Получаем сделки, исключая уже просмотренные
             stmt = (
@@ -70,9 +73,9 @@ async def get_new_direct_trades_for_user(user_id: int, limit: int = 10) -> List[
                 )
                 .where(
                     DirectTrades.type_ == True,
-                    DirectTrades.id.not_in(viewed_ids) if viewed_ids else True
+                    DirectTrades.id.not_in(viewed_ids)  # Теперь всегда работает, даже если viewed_ids пуст
                 )
-                .order_by(DirectTrades.publication_date.desc())
+                .order_by(DirectTrades.publication_date.desc())  # Самые свежие — вперед
                 .limit(limit)
             )
             result = await session.execute(stmt)
@@ -145,7 +148,7 @@ async def mark_trade_as_viewed(user_id: int, trade_id: int):
             viewed = UserViewedTrade(user_id=user_id, trade_id=trade_id)
             session.add(viewed)
             await session.commit()
-            logger.info(f"Пользователь {user_id} пометил сделку {trade_id} как просмотренную")
+            logger.info(f"Пользователь {user_id} успешно пометил сделку {trade_id} как просмотренную")
         except Exception as e:
             logger.error(f"Ошибка при пометке сделки {trade_id} как просмотренной: {e}", exc_info=True)
             await session.rollback()
@@ -247,4 +250,86 @@ async def get_request_logs(trade_id: int) -> List[Dict[str, Any]]:
             ]
         except Exception as e:
             logger.error(f"Ошибка при получении логов запросов для сделки {trade_id}: {e}", exc_info=True)
+            return []
+        
+# database/dao.py
+
+async def add_to_favorites(user_id: int, trade_id: int) -> bool:
+    """Добавляет сделку в избранное"""
+    async with async_session() as session:
+        try:
+            # Проверим, нет ли уже
+            stmt = select(UserAction).where(
+                UserAction.user_id == user_id,
+                UserAction.trade_id == trade_id,
+                UserAction.action_type == 'favorite'
+            )
+            result = await session.execute(stmt)
+            exists = result.scalar_one_or_none()
+
+            if exists:
+                return True  # Уже в избранном
+
+            action = UserAction(
+                user_id=user_id,
+                trade_id=trade_id,
+                action_type='favorite'
+            )
+            session.add(action)
+            await session.commit()
+            logger.info(f"Пользователь {user_id} добавил сделку {trade_id} в избранное")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении в избранное: {e}", exc_info=True)
+            await session.rollback()
+            return False
+
+
+async def create_task(user_id: int, trade_id: int, name: str, description: str, deadline: datetime) -> bool:
+    """Создаёт задачу с напоминанием"""
+    async with async_session() as session:
+        try:
+            task = Task(
+                user_id=user_id,
+                trade_id=trade_id,
+                name=name,
+                description=description,
+                deadline=deadline
+            )
+            session.add(task)
+            await session.commit()
+            logger.info(f"Пользователь {user_id} создал задачу '{name}' на {deadline} для сделки {trade_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при создании задачи: {e}", exc_info=True)
+            await session.rollback()
+            return False
+
+
+async def get_user_tasks(user_id: int) -> List[Dict[str, Any]]:
+    """Получает все задачи пользователя"""
+    async with async_session() as session:
+        try:
+            stmt = (
+                select(Task)
+                .options(selectinload(Task.trade))
+                .where(Task.user_id == user_id, Task.is_completed == False)
+                .order_by(Task.deadline)
+            )
+            result = await session.execute(stmt)
+            tasks = result.scalars().all()
+
+            return [
+                {
+                    'id': t.id,
+                    'name': t.name,
+                    'description': t.description,
+                    'deadline': t.deadline,
+                    'trade_id': t.trade_id,
+                    'debtor_name': t.trade.debtor_name if t.trade else 'Неизвестно'
+                }
+                for t in tasks
+            ]
+        except Exception as e:
+            logger.error(f"Ошибка при получении задач: {e}", exc_info=True)
             return []
