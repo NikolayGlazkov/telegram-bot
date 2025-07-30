@@ -1,0 +1,10 @@
+telegram_bot/
+├── main.py                 # основной файл бота
+├── config.py              # токен бота, данные БД
+├── database.py            # работа с MySQL
+├── keyboards.py           # генерация клавиатур
+├── handlers/              # обработчики команд
+│   ├── start.py
+│   ├── inline.py
+│   └── reply.py
+└── utils/                 # вспомогательные функции

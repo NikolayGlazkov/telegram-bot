@@ -1,0 +1,344 @@
+я делаю бот который собирает сообщеиня из базы данных и присылает их тому кто нажал старт потом обновляет на отправленное 
+
+# main.py
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher
+from handlers import start, inline, reply
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+token_bot = os.environ.get("BOT_TOKEN")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+if not token_bot:
+    logger.critical("Токен бота не найден!")
+    exit(1)
+
+bot = Bot(token=token_bot)
+dp = Dispatcher()
+
+# Словарь для хранения активных задач по пользователям
+user_tasks = {}
+
+async def main():
+    logger.info("Запуск бота...")
+    dp.include_routers(start.router, inline.router, reply.router)
+    logger.info("Роутеры подключены.")
+
+    try:
+        logger.info("Бот начал опрос (polling)...")
+        await dp.start_polling(bot)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот остановлен пользователем.")
+    finally:
+        # Отменяем все фоновые задачи при завершении
+        for task in user_tasks.values():
+            if not task.done():
+                task.cancel()
+        logger.info("Завершение работы бота.")
+        await bot.session.close()
+
+if __name__ == "__main__":
+    logger.info("Приложение запущено.")
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Приложение остановлено пользователем (Ctrl+C).")
+
+# handlers/start.py
+from aiogram import Router
+from aiogram.types import Message
+from aiogram.filters import Command
+from database import get_new_direct_trades, mark_trade_as_sent
+from database.db import async_session
+from keyboards import main_reply_keyboard, item_inline_keyboard
+from main import user_tasks
+import asyncio
+import logging
+from datetime import datetime
+
+router = Router()
+
+def format_trade_message(trade_data: dict) -> str:
+    """Форматирует сообщение о сделке"""
+    msg_parts = ["📢 <b>НОВАЯ ПРЯМАЯ СДЕЛКА !!!!!!------!!!!!!</b>\n"]
+    
+    msg_parts.append(f"\n🔗 Ссылка: {trade_data['url']}\n")
+    
+    if trade_data.get('message_number'):
+        msg_parts.append(f"#⃣ Номер сообщения: {trade_data['message_number']}")
+    
+    if trade_data.get('publication_date'):
+        if isinstance(trade_data['publication_date'], datetime):
+            pub_date = trade_data['publication_date'].strftime('%d.%m.%Y')
+        else:
+            pub_date = str(trade_data['publication_date'])
+        msg_parts.append(f"📅 Дата публикации: {pub_date}")
+    
+    if trade_data.get('debtor_name'):
+        msg_parts.append(f"👤 Должник: {trade_data['debtor_name']}")
+    
+    if trade_data.get('debtor_inn'):
+        msg_parts.append(f"🔢 ИНН должника: {trade_data['debtor_inn']}")
+    
+    if trade_data.get('auction_type'):
+        msg_parts.append(f"⚖️ Вид торгов: {trade_data['auction_type']}")
+    
+    if trade_data.get('place_of_conduct'):
+        msg_parts.append(f"📍 Место проведения: {trade_data['place_of_conduct']}")
+    
+    if trade_data.get('start_applications'):
+        if isinstance(trade_data['start_applications'], datetime):
+            start_apps = trade_data['start_applications'].strftime('%d.%m.%Y %H:%M')
+        else:
+            start_apps = str(trade_data['start_applications'])
+        msg_parts.append(f"⏳ Начало заявок: {start_apps}")
+    
+    if trade_data.get('end_applications'):
+        if isinstance(trade_data['end_applications'], datetime):
+            end_apps = trade_data['end_applications'].strftime('%d.%m.%Y %H:%M')
+        else:
+            end_apps = str(trade_data['end_applications'])
+        msg_parts.append(f"⌛ Конец заявок: {end_apps}")
+    
+    if trade_data.get('arbitrator_name'):
+        msg_parts.append(f"🧑‍⚖️ Арбитр: {trade_data['arbitrator_name']}")
+    
+    if trade_data.get('arbitrator_inn'):
+        msg_parts.append(f"🔢 ИНН арбитра: {trade_data['arbitrator_inn']}")
+    
+    if trade_data.get('emails'):
+        msg_parts.append(f"📧 Email: {trade_data['emails']}")
+    
+    if trade_data.get('lots'):
+        msg_parts.append("\n📦 <b>ЛОТЫ:</b>\n")
+        for lot in trade_data['lots']:
+            desc = lot['description'] or 'Без описания'
+            price_value = lot['price']
+            if price_value is not None:
+                try:
+                    price = f"{float(price_value):,.0f}".replace(",", " ")
+                except (ValueError, TypeError):
+                    price = "N/A"
+            else:
+                price = "0"
+            lot_number = lot['lot_number'] if lot['lot_number'] is not None else 0
+            msg_parts.append(f"{lot_number}. {desc} — <b>{price} руб.</b>")
+    
+    return "\n".join(msg_parts)
+
+async def send_trades_to_user(bot, user_id):
+    """Фоновая задача для отправки сделок конкретному пользователю"""
+    iteration_count = 0
+    while True:
+        iteration_count += 1
+        try:
+            logging.info(f"[Пользователь {user_id}] Итерация #{iteration_count}: Проверяю новые сделки...")
+            
+            async with async_session() as session:
+                trades = await get_new_direct_trades(limit=5)
+                logging.info(f"[Пользователь {user_id}] Получено {len(trades)} сделок")
+                
+                if not trades:
+                    logging.info(f"[Пользователь {user_id}] Новых сделок нет")
+                else:
+                    for trade in trades:
+                        try:
+                            msg_text = format_trade_message(trade)
+                            sent_message = await bot.send_message(
+                                chat_id=user_id, 
+                                text=msg_text, 
+                                parse_mode="HTML", 
+                                reply_markup=item_inline_keyboard(trade['id'])
+                            )
+                            logging.info(f"[Пользователь {user_id}] Отправлена сделка {trade['id']} (message_id: {sent_message.message_id})")
+                            
+                            # Помечаем как отправленное
+                            success = await mark_trade_as_sent(trade['id'])
+                            if success:
+                                logging.info(f"[Пользователь {user_id}] Сделка {trade['id']} помечена как отправленная")
+                            else:
+                                logging.warning(f"[Пользователь {user_id}] Не удалось пометить сделку {trade['id']} как отправленную")
+                            
+                        except Exception as send_error:
+                            logging.error(f"[Пользователь {user_id}] Ошибка отправки сделки {trade['id']}: {send_error}", exc_info=True)
+                        
+        except Exception as e:
+            logging.error(f"[Пользователь {user_id}] Ошибка в итерации #{iteration_count}: {e}", exc_info=True)
+        
+        await asyncio.sleep(20)
+
+@router.message(Command("start"))
+async def start_handler(message: Message, bot):
+    user_id = message.from_user.id
+    logging.info(f"Пользователь {user_id} ({message.from_user.username}) отправил команду /start")
+    
+    # Отправляем приветственное сообщение
+    await message.answer("Привет! Начинаю отправлять данные о прямых сделках...", reply_markup=main_reply_keyboard())
+    
+    # Если уже есть задача для этого пользователя - отменяем
+    if user_id in user_tasks:
+        if not user_tasks[user_id].done():
+            user_tasks[user_id].cancel()
+        del user_tasks[user_id]
+        logging.info(f"Предыдущая задача для пользователя {user_id} отменена")
+    
+    # Создаем новую фоновую задачу для этого пользователя
+    task = asyncio.create_task(send_trades_to_user(bot, user_id))
+    user_tasks[user_id] = task
+    logging.info(f"Запущена фоновая задача для пользователя {user_id}")
+
+# database/dao.py
+from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
+from typing import List, Dict, Any, Optional
+from sqlalchemy.exc import SQLAlchemyError
+import logging
+from .base import connection
+from .models import User, DirectTrades, ArbitrationManager, ArbitrationManagerContact, Lot
+
+# Настройка логгирования
+Logger = logging.getLogger(__name__)
+
+
+@connection
+async def set_user( tg_id: int, username: str, full_name: str) -> Optional[User]: # <-- session удален
+    
+    try:
+        # Логгирование добавлено для лучшей отладки
+        Logger.debug(f"Поиск/создание пользователя с ID {tg_id}")
+        user = await session.scalar(select(User).filter_by(id=tg_id))
+
+        if not user:
+            new_user = User(id=tg_id, username=username, full_name=full_name)
+            session.add(new_user)
+            await session.commit()
+            Logger.info(f"Зарегистрировал пользователя с ID {tg_id}!")
+            return new_user
+        else:
+            Logger.info(f"Пользователь с ID {tg_id} найден!")
+            return user
+    except SQLAlchemyError as e:
+        Logger.error(f"Ошибка SQLAlchemy при добавлении пользователя {tg_id}: {e}")
+        await session.rollback()
+        return None
+    except Exception as e: # Добавлена общая обработка исключений
+        Logger.error(f"Неожиданная ошибка при добавлении пользователя {tg_id}: {e}", exc_info=True)
+        await session.rollback() # На всякий случай, хотя rollback для select не обязателен
+        return None
+
+# @connection
+async def get_new_direct_trades(limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Получает новые прямые сделки для отправки в телеграм.
+    Session передается явно, так как декоратор @connection не используется.
+    """
+    try:
+        Logger.debug(f"Начинаю получать сделки, limit={limit}")
+        # Выбираем только неразосланные прямые сделки с полной информацией
+        stmt = select(DirectTrades)\
+            .options(
+                selectinload(DirectTrades.arbitrator).selectinload(ArbitrationManager.contacts),
+                selectinload(DirectTrades.lots)
+            )\
+            .where(DirectTrades.type_ == True, DirectTrades.is_sent == False)\
+            .order_by(DirectTrades.publication_date.desc())\
+            .limit(limit)
+        
+        result = await session.execute(stmt)
+        trades = result.scalars().all()
+        Logger.debug(f"Из базы данных получено {len(trades)} сделок")
+        
+        # Преобразуем в словари для удобной отправки
+        trades_data = []
+        for trade in trades:
+            Logger.debug(f"Обрабатываю сделку ID {trade.id}")
+            # Собираем email'ы арбитражного управляющего
+            emails = []
+            if trade.arbitrator and trade.arbitrator.contacts:
+                emails = [contact.email for contact in trade.arbitrator.contacts if contact.email]
+            
+            # Собираем лоты
+            lots_data = []
+            if trade.lots:
+                for lot in trade.lots:
+                    lots_data.append({
+                        'lot_number': lot.lot_number,
+                        'description': lot.description or '',
+                        'price': float(lot.price) if lot.price else 0.0
+                    })
+            
+            trade_data = {
+                'id': trade.id,
+                'message_number': trade.message_number,
+                'publication_date': trade.publication_date,
+                'url': trade.url,
+                'debtor_name': trade.debtor_name,
+                'debtor_inn': trade.debtor_inn,
+                'auction_type': trade.auction_type,
+                'place_of_conduct': trade.place_of_conduct,
+                'debtor_phone': trade.debtor_phone,
+                'start_applications': trade.start_applications,
+                'end_applications': trade.end_applications,
+                'arbitrator_name': trade.arbitrator.full_name if trade.arbitrator else None,
+                'arbitrator_inn': trade.arbitrator.inn if trade.arbitrator else None,
+                'emails': ', '.join(emails) if emails else None,
+                'lots': lots_data
+            }
+            trades_data.append(trade_data)
+            Logger.debug(f"Сделка ID {trade.id} обработана")
+        
+        Logger.info(f"Подготовлено {len(trades_data)} сделок для отправки")
+        return trades_data
+    except SQLAlchemyError as e:
+        Logger.error(f"Ошибка SQLAlchemy при получении новых прямых сделок: {e}")
+        return []
+    except Exception as e:
+        Logger.error(f"Неожиданная ошибка при получении прямых сделок: {e}", exc_info=True) # Добавлено exc_info
+        return []
+
+@connection
+async def mark_trade_as_sent(trade_id: int) -> bool:
+    """
+    Помечает сделку как отправленную.
+    Session передается декоратором @connection.
+    """
+    try:
+        Logger.debug(f"Пометка сделки {trade_id} как отправленной")
+        # Используем более простой запрос
+        stmt = select(DirectTrades).where(
+            DirectTrades.id == trade_id, 
+            DirectTrades.is_sent == False
+        )
+        result = await session.execute(stmt)
+        trade = result.scalar_one_or_none()
+        
+        if trade:
+            Logger.debug(f"Сделка {trade_id} найдена, обновляю статус")
+            trade.is_sent = True
+            await session.commit()
+            Logger.info(f"Сделка {trade_id} помечена как отправленная")
+            return True
+        else:
+            # Проверим, существует ли сделка вообще
+            stmt_check = select(DirectTrades.id).where(DirectTrades.id == trade_id)
+            result_check = await session.execute(stmt_check)
+            exists = result_check.scalar_one_or_none()
+            
+            if exists:
+                Logger.warning(f"Сделка {trade_id} уже была отправлена (is_sent=True)")
+            else:
+                Logger.warning(f"Сделка {trade_id} не найдена в базе данных")
+            return False
+    except SQLAlchemyError as e:
+        Logger.error(f"Ошибка SQLAlchemy при пометке сделки {trade_id} как отправленной: {e}")
+        await session.rollback()
+        return False
+    except Exception as e:
+        Logger.error(f"Неожиданная ошибка при пометке сделки {trade_id} как отправленной: {e}", exc_info=True)
+        await session.rollback()
+        return False
